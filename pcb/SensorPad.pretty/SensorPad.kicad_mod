@@ -1,0 +1,18 @@
+(footprint "SensorPad" (version 20221018) (generator pcbnew)
+  (layer "F.Cu")
+  (attr smd)
+  (fp_text reference "REF**" (at 7.62 1.27 unlocked) (layer "F.SilkS") hide
+      (effects (font (size 1 1) (thickness 0.15)))
+    (tstamp af3ed5fd-f902-4049-9cd9-e6ba466b309b)
+  )
+  (fp_text value "SensorPad" (at 0 1 unlocked) (layer "F.Fab")
+      (effects (font (size 1 1) (thickness 0.15)))
+    (tstamp a6e013de-b08c-4bb0-af0d-ab5305fb7b8f)
+  )
+  (fp_text user "${REFERENCE}" (at 10.16 3.81 unlocked) (layer "F.Fab") hide
+      (effects (font (size 1 1) (thickness 0.15)))
+    (tstamp 1ecdccab-6bb4-4326-8668-fc2c511041c6)
+  )
+  (pad "1" smd roundrect (at 0 0) (size 10 60) (layers "F.Cu") (roundrect_rratio 0.32)
+    (chamfer_ratio 0.42) (chamfer bottom_left bottom_right) (tstamp 7027fbba-7538-4e05-adda-6fcd96129a98))
+)
