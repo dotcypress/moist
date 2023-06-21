@@ -46,5 +46,9 @@ pub mod command {
     pub const WRITE_ILLUMINANCE_OFFSET: u8 = ILLUMINANCE_ADDR + 4;
     pub const WRITE_ILLUMINANCE_SLOPE: u8 = ILLUMINANCE_ADDR + 5;
 
+    const LED_ADDR: u8 = 0x10;
+    pub const READ_LED: u8 = LED_ADDR;
+    pub const WRITE_LED: u8 = LED_ADDR + 1;
+
     pub const SAVE_NVM: u8 = 0xff;
 }

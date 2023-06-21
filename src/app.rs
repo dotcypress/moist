@@ -22,27 +22,16 @@ pub trait I2CPeripheral {
 
 pub struct SensorState {
     raw: u16,
-    offset: u16,
-    slope: u16,
-}
-
-impl Default for SensorState {
-    fn default() -> Self {
-        Self::new()
-    }
+    cfg: SensorConfig,
 }
 
 impl SensorState {
-    pub fn new() -> Self {
-        Self {
-            raw: 0,
-            offset: 0,
-            slope: 0,
-        }
+    pub fn new(cfg: SensorConfig) -> Self {
+        Self { cfg, raw: 0 }
     }
 
     pub fn val(&self) -> u16 {
-        let val = self.raw.saturating_sub(self.offset) as u32 * 1024 / self.slope as u32;
+        let val = self.raw.saturating_sub(self.cfg.offset) as u32 * 1024 / self.cfg.slope as u32;
         val.min(u16::MAX as _) as _
     }
 
@@ -50,60 +39,44 @@ impl SensorState {
         self.raw
     }
 
-    pub fn set_raw(&mut self, val: u16) {
+    pub fn update(&mut self, val: u16) {
         self.raw = val;
     }
+}
 
-    pub fn offset(&self) -> u16 {
-        self.offset
-    }
-
-    pub fn slope(&self) -> u16 {
-        self.slope
-    }
-
-    pub fn set_slope(&mut self, slope: u16) {
-        self.slope = slope;
-    }
-
-    pub fn set_offset(&mut self, offset: u16) {
-        self.offset = offset;
-    }
+pub enum AppRequest {
+    SetLedColor([u8; 3]),
+    SaveConfig(Config),
 }
 
 pub struct App {
     moisture: SensorState,
     illuminance: SensorState,
+    led_color: u16,
     write_pend: Option<u8>,
     scratch: [u8; 2],
 }
 
-impl Default for App {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl App {
-    pub fn new() -> Self {
+    pub fn new(cfg: Config) -> Self {
         Self {
-            moisture: SensorState::new(),
-            illuminance: SensorState::new(),
+            moisture: SensorState::new(cfg.moisture),
+            illuminance: SensorState::new(cfg.illuminance),
+            led_color: 0,
             write_pend: None,
             scratch: [0; 2],
         }
     }
 
     pub fn push_samples(&mut self, moisture: u16, illuminance: u16) {
-        self.moisture.set_raw(moisture);
-        self.illuminance.set_raw(illuminance);
-        defmt::info!("{}\t\t{}", self.moisture.val() >> 8, self.moisture.raw());
+        self.moisture.update(moisture);
+        self.illuminance.update(illuminance);
     }
 
-    pub fn poll_i2c<E>(
+    pub fn poll<E>(
         &mut self,
         i2c: &mut dyn I2CPeripheral<Error = E>,
-    ) -> Result<Option<Config>, E> {
+    ) -> Result<Option<AppRequest>, E> {
         loop {
             match i2c.poll()? {
                 None => {
@@ -122,10 +95,19 @@ impl App {
                         let val = u16::from_be_bytes(inbox);
 
                         match cmd {
-                            command::WRITE_MOISTURE_OFFSET => self.moisture.set_offset(val),
-                            command::WRITE_MOISTURE_SLOPE => self.moisture.set_slope(val),
-                            command::WRITE_ILLUMINANCE_OFFSET => self.illuminance.set_offset(val),
-                            command::WRITE_ILLUMINANCE_SLOPE => self.illuminance.set_slope(val),
+                            command::WRITE_MOISTURE_OFFSET => self.moisture.cfg.offset = val,
+                            command::WRITE_MOISTURE_SLOPE => self.moisture.cfg.slope = val,
+                            command::WRITE_ILLUMINANCE_OFFSET => self.illuminance.cfg.offset = val,
+                            command::WRITE_ILLUMINANCE_SLOPE => self.illuminance.cfg.slope = val,
+                            command::WRITE_LED => {
+                                self.led_color = val;
+                                let rgb = [
+                                    self.led_color as u8 & 0x0f,
+                                    (self.led_color >> 4) as u8 & 0x0f,
+                                    (self.led_color >> 8) as u8 & 0x0f,
+                                ];
+                                break Ok(Some(AppRequest::SetLedColor(rgb)));
+                            }
                             _ => unreachable!(),
                         }
                     } else {
@@ -137,26 +119,27 @@ impl App {
                             command::WRITE_MOISTURE_OFFSET
                             | command::WRITE_MOISTURE_SLOPE
                             | command::WRITE_ILLUMINANCE_OFFSET
-                            | command::WRITE_ILLUMINANCE_SLOPE => {
+                            | command::WRITE_ILLUMINANCE_SLOPE
+                            | command::WRITE_LED => {
                                 self.write_pend = Some(cmd);
                                 continue;
                             }
                             command::READ_MOISTURE => self.moisture.val().to_be_bytes(),
                             command::READ_MOISTURE_RAW => self.moisture.raw().to_be_bytes(),
-                            command::READ_MOISTURE_OFFSET => self.moisture.offset().to_be_bytes(),
-                            command::READ_MOISTURE_SLOPE => self.moisture.slope().to_be_bytes(),
+                            command::READ_MOISTURE_OFFSET => self.moisture.cfg.offset.to_be_bytes(),
+                            command::READ_MOISTURE_SLOPE => self.moisture.cfg.slope.to_be_bytes(),
                             command::READ_ILLUMINANCE => self.illuminance.val().to_be_bytes(),
                             command::READ_ILLUMINANCE_RAW => self.illuminance.raw().to_be_bytes(),
                             command::READ_ILLUMINANCE_OFFSET => {
-                                self.illuminance.offset().to_be_bytes()
+                                self.illuminance.cfg.offset.to_be_bytes()
                             }
                             command::READ_ILLUMINANCE_SLOPE => {
-                                self.illuminance.slope().to_be_bytes()
+                                self.illuminance.cfg.slope.to_be_bytes()
                             }
+                            command::READ_LED => self.led_color.to_be_bytes(),
                             command::SAVE_NVM => {
-                                let cfg =
-                                    Config::new(self.moisture.offset(), self.moisture.slope());
-                                break Ok(Some(cfg));
+                                let cfg = Config::new(self.moisture.cfg, self.illuminance.cfg);
+                                break Ok(Some(AppRequest::SaveConfig(cfg)));
                             }
                             _ => self.moisture.val().to_be_bytes(),
                         }

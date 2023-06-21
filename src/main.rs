@@ -23,19 +23,19 @@ use hal::stm32;
 use hal::timer::pwm::PwmPin;
 use hal::timer::*;
 
-pub const ADDRESS: Address = 0x0a;
+pub const ADDRESS: Address = 0x22;
 
 pub type I2cClk = PB8<Output<OpenDrain>>;
 pub type I2cSda = PB9<Output<OpenDrain>>;
 pub type I2cDev = i2c::I2c<stm32::I2C1, I2cSda, I2cClk>;
 pub type Sense = (adc::Adc, PA5<Analog>, PA1<Analog>);
 pub type Led = (
-    PwmPin<stm32::TIM3, Channel1>,
+    PwmPin<stm32::TIM3, Channel3>,
     PwmPin<stm32::TIM3, Channel2>,
-    PwmPin<stm32::TIM3, Channel4>,
+    PwmPin<stm32::TIM3, Channel1>,
 );
 
-#[rtic::app(device = hal::stm32, peripherals = true, dispatchers = [CEC])]
+#[rtic::app(device = hal::stm32, peripherals = true, dispatchers = [CEC, PVD])]
 mod moist {
     use super::*;
 
@@ -48,6 +48,7 @@ mod moist {
     struct Local {
         sense: Sense,
         i2c: I2cDev,
+        led: Led,
         timer: Timer<stm32::TIM16>,
         flash: Option<stm32::FLASH>,
     }
@@ -56,6 +57,7 @@ mod moist {
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
         defmt::info!("init");
 
+        let flash = Some(ctx.device.FLASH);
         let mut rcc = ctx.device.RCC.constrain();
 
         let port_a = ctx.device.GPIOA.split(&mut rcc);
@@ -81,7 +83,19 @@ mod moist {
         adc.set_oversampling_shift(16);
         adc.oversampling_enable(true);
 
-        let led_pwm = ctx.device.TIM3.pwm(8.kHz(), &mut rcc);
+        let pwm = ctx.device.TIM14.pwm(200.kHz(), &mut rcc);
+        let mut pwm = pwm.bind_pin(port_a.pa4);
+        pwm.set_duty(pwm.get_max_duty() / 8);
+        pwm.enable();
+
+        let cfg = Config::load();
+        let app = App::new(cfg);
+
+        let mut timer = ctx.device.TIM16.timer(&mut rcc);
+        timer.start(100.millis());
+        timer.listen();
+
+        let led_pwm = ctx.device.TIM3.pwm(1.kHz(), &mut rcc);
         let mut pwm_r = led_pwm.bind_pin(port_b.pb0);
         let mut pwm_g = led_pwm.bind_pin(port_a.pa7);
         let mut pwm_b = led_pwm.bind_pin(port_a.pa6);
@@ -93,29 +107,15 @@ mod moist {
         pwm_g.enable();
         pwm_b.enable();
 
-        let pwm = ctx.device.TIM14.pwm(200.kHz(), &mut rcc);
-        let mut pwm = pwm.bind_pin(port_a.pa4);
-        pwm.set_duty(pwm.get_max_duty() / 8);
-        pwm.enable();
+        let led = (pwm_r, pwm_g, pwm_b);
 
-        let mut timer = ctx.device.TIM16.timer(&mut rcc);
-        timer.start(50.millis());
-        timer.listen();
-
-        let opts = Config::load();
-        let flash = Some(ctx.device.FLASH);
-
-        let mut app = App::new();
-        app.moisture().set_offset(opts.offset);
-        app.moisture().set_slope(opts.slope);
-
-        defmt::info!("init: {} {}", opts.offset, opts.slope);
         defmt::info!("init completed");
         (
             Shared { app },
             Local {
                 i2c,
                 timer,
+                led,
                 flash,
                 sense: (adc, moisture_sense, photo_sense),
             },
@@ -127,9 +127,8 @@ mod moist {
     fn timer_tick(ctx: timer_tick::Context) {
         let timer_tick::LocalResources { timer, sense } = ctx.local;
         let mut app = ctx.shared.app;
-
         let moisture = u16::MAX - sense.0.read(&mut sense.1).unwrap_or(0);
-        let illuminance = u16::MAX - sense.0.read(&mut sense.2).unwrap_or(0);
+        let illuminance = sense.0.read(&mut sense.2).unwrap_or(0);
         app.lock(|app| app.push_samples(moisture, illuminance));
 
         timer.clear_irq();
@@ -138,8 +137,11 @@ mod moist {
     #[task(priority = 2, binds = I2C1, local = [i2c], shared=[app])]
     fn i2c_rx(ctx: i2c_rx::Context) {
         let mut app = ctx.shared.app;
-        match app.lock(|app| app.poll_i2c(ctx.local.i2c)) {
-            Ok(Some(cfg)) => {
+        match app.lock(|app| app.poll(ctx.local.i2c)) {
+            Ok(Some(AppRequest::SetLedColor(color))) => {
+                update_led::spawn(color).ok();
+            }
+            Ok(Some(AppRequest::SaveConfig(cfg))) => {
                 save_nvm::spawn(cfg).ok();
             }
             Err(err) => {
@@ -158,6 +160,14 @@ mod moist {
         }
     }
 
+    #[task(priority = 2, local = [led])]
+    fn update_led(ctx: update_led::Context, color: [u8; 3]) {
+        let max = ctx.local.led.0.get_max_duty() as u32 + 1;
+        ctx.local.led.0.set_duty(max - color[0] as u32 * 256);
+        ctx.local.led.1.set_duty(max - color[1] as u32 * 256);
+        ctx.local.led.2.set_duty(max - color[2] as u32 * 256);
+    }
+
     #[task(priority = 3, local = [flash])]
     fn save_nvm(ctx: save_nvm::Context, cfg: Config) {
         if let Some(flash) = ctx.local.flash.take() {
@@ -172,4 +182,3 @@ mod moist {
         }
     }
 }
-
